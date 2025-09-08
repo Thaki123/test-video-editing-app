@@ -18,13 +18,17 @@ const saturationInput = document.getElementById('saturation') as HTMLInputElemen
 
 let shader: ShaderController | null = null;
 
-// Populate style options
-for (const p of STYLES) {
-  const opt = document.createElement('option');
-  opt.value = p.id;
-  opt.textContent = p.name;
-  styleSelect.appendChild(opt);
+function populateStyles() {
+  styleSelect.innerHTML = '';
+  for (const p of STYLES) {
+    const opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = p.name;
+    styleSelect.appendChild(opt);
+  }
 }
+
+populateStyles();
 
 uploadInput.addEventListener('change', () => {
   const file = uploadInput.files?.[0];
