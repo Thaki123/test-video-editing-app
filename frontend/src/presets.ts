@@ -8,17 +8,21 @@ export interface Style {
 // Available styling options driven by ML models
 export const STYLES: Style[] = [
   { id: 'none', name: 'None' },
-  { id: 'anime', name: 'AnimeGAN' }
+  { id: 'anime', name: 'AnimeGAN' },
+  { id: 'manga', name: 'Manga' },
+  { id: 'watercolor', name: 'Watercolor' },
+  { id: 'pencil', name: 'Pencil Sketch' }
 ];
 
-let animeSession: ort.InferenceSession | null = null;
+const sessionCache: Record<string, ort.InferenceSession> = {};
 
-async function ensureAnimeSession() {
-  if (!animeSession) {
+async function getSession(styleId: string): Promise<ort.InferenceSession> {
+  if (!sessionCache[styleId]) {
     // Use CDN for wasm assets
     ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.0/dist/';
-    animeSession = await ort.InferenceSession.create('/models/animeganv2.onnx');
+    sessionCache[styleId] = await ort.InferenceSession.create(`/models/${styleId}.onnx`);
   }
+  return sessionCache[styleId];
 }
 
 export async function applyStyle(
@@ -38,13 +42,13 @@ export async function applyStyle(
     return;
   }
 
-  await ensureAnimeSession();
+  const session = await getSession(styleId);
   const imageData = ctx.getImageData(0, 0, vw, vh);
   const input = preprocess(imageData);
   const feeds: Record<string, ort.Tensor> = {};
-  feeds[animeSession!.inputNames[0]] = new ort.Tensor('float32', input, [1, 3, vh, vw]);
-  const results = await animeSession!.run(feeds);
-  const output = results[animeSession!.outputNames[0]];
+  feeds[session.inputNames[0]] = new ort.Tensor('float32', input, [1, 3, vh, vw]);
+  const results = await session.run(feeds);
+  const output = results[session.outputNames[0]];
   const outData = postprocess(output.data as Float32Array, vw, vh);
   const outImageData = new ImageData(outData, vw, vh);
   ctx.putImageData(outImageData, 0, 0);
