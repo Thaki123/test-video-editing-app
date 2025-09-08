@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Video Styler</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body class="dark">
+    <h1>Video Styler</h1>
+    <input type="file" id="upload" accept="video/*" />
+    <select id="preset"></select>
+    <div class="preview">
+      <video id="original" controls></video>
+      <canvas id="styled"></canvas>
+    </div>
+    <div class="controls">
+      <label>Start <input type="number" id="start" value="0" /></label>
+      <label>End <input type="number" id="end" value="0" /></label>
+      <button id="render">Pro Render</button>
+      <progress id="progress" value="0" max="100"></progress>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
