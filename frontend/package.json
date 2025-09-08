@@ -16,6 +16,7 @@
     "vitest": "^3.2.4"
   },
   "dependencies": {
-    "@ffmpeg/ffmpeg": "^0.12.15"
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "onnxruntime-web": "^1.19.0"
   }
 }
