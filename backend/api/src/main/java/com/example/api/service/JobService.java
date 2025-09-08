@@ -12,21 +12,34 @@ import com.example.api.web.JobStatusResponse;
 
 @Service
 public class JobService {
-    private final RabbitTemplate rabbitTemplate;
-    private final Map<String, JobStatusResponse> store = new ConcurrentHashMap<>();
+    private record JobData(String id, String status, String downloadKey) {}
 
-    public JobService(RabbitTemplate rabbitTemplate) {
+    private final RabbitTemplate rabbitTemplate;
+    private final StorageService storageService;
+    private final Map<String, JobData> store = new ConcurrentHashMap<>();
+
+    public JobService(RabbitTemplate rabbitTemplate, StorageService storageService) {
         this.rabbitTemplate = rabbitTemplate;
+        this.storageService = storageService;
     }
 
     public String enqueueJob(JobRequest request) {
         String id = UUID.randomUUID().toString();
         rabbitTemplate.convertAndSend("jobs", id);
-        store.put(id, new JobStatusResponse(id, "QUEUED", null));
+        store.put(id, new JobData(id, "QUEUED", null));
         return id;
     }
 
     public JobStatusResponse getJob(String id) {
-        return store.getOrDefault(id, new JobStatusResponse(id, "NOT_FOUND", null));
+        JobData data = store.get(id);
+        if (data == null) {
+            return new JobStatusResponse(id, "NOT_FOUND", null);
+        }
+        String url = data.downloadKey != null ? storageService.generatePresignedDownloadUrl(data.downloadKey) : null;
+        return new JobStatusResponse(data.id, data.status, url);
+    }
+
+    public void completeJob(String id, String objectKey) {
+        store.put(id, new JobData(id, "COMPLETED", objectKey));
     }
 }
