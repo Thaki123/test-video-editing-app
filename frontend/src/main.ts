@@ -2,6 +2,7 @@ import './style.css';
 import { STYLES, applyStyle } from './presets';
 import { convertToWebM } from './ffmpeg';
 import { hasWebGL, applyShader } from './webgl';
+import type { ShaderController } from './webgl';
 
 const uploadInput = document.getElementById('upload') as HTMLInputElement;
 const original = document.getElementById('original') as HTMLVideoElement;
@@ -11,6 +12,11 @@ const startInput = document.getElementById('start') as HTMLInputElement;
 const endInput = document.getElementById('end') as HTMLInputElement;
 const renderBtn = document.getElementById('render') as HTMLButtonElement;
 const progress = document.getElementById('progress') as HTMLProgressElement;
+const edgeInput = document.getElementById('edge') as HTMLInputElement;
+const posterInput = document.getElementById('poster') as HTMLInputElement;
+const saturationInput = document.getElementById('saturation') as HTMLInputElement;
+
+let shader: ShaderController | null = null;
 
 // Populate style options
 for (const p of STYLES) {
@@ -27,9 +33,24 @@ uploadInput.addEventListener('change', () => {
   original.onloadedmetadata = () => {
     endInput.value = Math.floor(original.duration).toString();
     if (hasWebGL()) {
-      applyShader(original, styled);
+      shader = applyShader(original, styled) || null;
+      shader?.setUniforms({
+        edgeWeight: parseFloat(edgeInput.value),
+        posterize: parseFloat(posterInput.value),
+        saturation: parseFloat(saturationInput.value)
+      });
     }
   };
+});
+
+edgeInput.addEventListener('input', () => {
+  shader?.setUniforms({ edgeWeight: parseFloat(edgeInput.value) });
+});
+posterInput.addEventListener('input', () => {
+  shader?.setUniforms({ posterize: parseFloat(posterInput.value) });
+});
+saturationInput.addEventListener('input', () => {
+  shader?.setUniforms({ saturation: parseFloat(saturationInput.value) });
 });
 
 async function renderFrame() {
