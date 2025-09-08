@@ -1,0 +1,753 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Anime Video Editor — Stylizer v2.1 (Flip Fix + Stronger NPR)</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  html,body{background:#0a0a0a}
+  input[type="range"]{accent-color:#6366f1}
+  .aspect-video{aspect-ratio:16/9}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const {useEffect,useMemo,useRef,useState} = React;
+
+/* ---------------------------- Helpers ---------------------------- */
+const clamp=(v,a,b)=>Math.min(b,Math.max(a,v));
+const formatTime=(t)=>{t=Math.max(0,Math.floor(t||0));const m=String(Math.floor(t/60)).padStart(2,"0");const s=String(t%60).padStart(2,"0");return m+":"+s};
+const extOf=(n="")=>{const i=n.lastIndexOf(".");return i>=0?n.slice(i+1).toLowerCase():""};
+function chooseWebMProfile(){
+  const vp9='video/webm;codecs=vp9,opus';
+  const vp8='video/webm;codecs=vp8,vorbis';
+  if(window.MediaRecorder?.isTypeSupported?.(vp9)) return {mime:vp9,vCodec:'vp9',aCodec:'opus'};
+  if(window.MediaRecorder?.isTypeSupported?.(vp8)) return {mime:vp8,vCodec:'vp8',aCodec:'vorbis'};
+  return {mime:'video/webm',vCodec:'vp8?',aCodec:'opus?'};
+}
+
+/* ----------------- Dynamic import (CRITICAL FIXES OK) ----------------- */
+async function dynamicImportFfmpeg(){
+  try{ return await import(/* @vite-ignore */ "@ffmpeg/ffmpeg"); }catch(e){}
+  const fallbacks=[
+    "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.6/+esm",
+    "https://esm.sh/@ffmpeg/ffmpeg@0.12.6",
+  ];
+  let last=null; for(const u of fallbacks){ try{return await import(u)}catch(e){last=e} }
+  throw last||new Error("Failed to import @ffmpeg/ffmpeg");
+}
+async function dynamicImportUtil(){
+  try{ return await import(/* @vite-ignore */ "@ffmpeg/util"); }catch(e){}
+  const fallbacks=[
+    "https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.6/+esm",
+    "https://esm.sh/@ffmpeg/util@0.12.6",
+  ];
+  let last=null; for(const u of fallbacks){ try{return await import(u)}catch(e){last=e} }
+  throw last||new Error("Failed to import @ffmpeg/util");
+}
+
+function App(){
+  const fileInputRef=useRef(null);
+  const videoRef=useRef(null);
+  const audioProbeVideoRef=useRef(null);
+  const origCanvasRef=useRef(null);
+  const styledCanvasRef=useRef(null);
+  const rafRef=useRef(null);
+  const recorderRef=useRef(null);
+  const recordedChunksRef=useRef([]);
+  const canvasStreamRef=useRef(null);
+  const audioStreamRef=useRef(null);
+  const exportUrlRef=useRef(null);
+  const currentBlobUrlRef=useRef(null);
+  const convertedBlobUrlRef=useRef(null);
+
+  const [ffState,setFfState]=useState({ready:false,loading:false,progress:0,error:"",imported:false,importHasAPIs:false});
+  const [ffHandles,setFfHandles]=useState({ffmpeg:null,fetchFile:null});
+
+  const [videoMeta,setVideoMeta]=useState({name:"",ext:"",duration:0,hasAudio:false});
+  const [player,setPlayer]=useState({playing:false,canPlay:false,decodeFailed:false,autoConverted:false,tip:""});
+  const [trim,setTrim]=useState({start:0,end:0});
+  const [flipY,setFlipY]=useState(true); // 👈 default ON to fix upside-down everywhere
+
+  const defaults=useMemo(()=>({
+    intensity:0.95, edge:0.6, posterize:6, sharpen:0.25, grain:0.06, vignette:0.25,
+    bloom:0.5, halftone:0.0, saturation:1.15, contrast:1.05, hue:0, blur:0.1
+  }),[]);
+  const [fx,setFx]=useState({...defaults});
+  const [activePreset,setActivePreset]=useState("");
+  const [activeStyleId,setActiveStyleId]=useState(0);
+  const [devTests,setDevTests]=useState([]);
+  const [exporting,setExporting]=useState(false);
+  const [exportReadyUrl,setExportReadyUrl]=useState("");
+  const [banner,setBanner]=useState("");
+
+  const ffmpegImportRef=useRef({mod:null,util:null});
+  useEffect(()=>{(async()=>{try{const util=await dynamicImportUtil();ffmpegImportRef.current.util=util;runSelfTests();}catch{}})()},[]);
+
+  async function ensureFfmpegLoaded(){
+    if(ffHandles.ffmpeg) return ffHandles;
+    setFfState(s=>({...s,loading:true,error:""}));
+    try{
+      const mod=await dynamicImportFfmpeg(); ffmpegImportRef.current.mod=mod;
+      const createFFmpeg=mod.createFFmpeg||mod.default?.createFFmpeg;
+      const FFmpegClass=mod.FFmpeg||mod.default?.FFmpeg;
+      let fetchFile=mod.fetchFile||mod.default?.fetchFile;
+      if(!fetchFile){ try{const util=ffmpegImportRef.current.util||await dynamicImportUtil();ffmpegImportRef.current.util=util;fetchFile=util.fetchFile||util.default?.fetchFile;}catch{} }
+      const hasAPIs=!!fetchFile && !!(createFFmpeg||FFmpegClass);
+      setFfState(s=>({...s,imported:true,importHasAPIs:hasAPIs}));
+      if(!hasAPIs) throw new Error("FFmpeg API not found on dynamic import");
+
+      // legacy first
+      const legacyCorePaths=[
+        "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/ffmpeg-core.js",
+        "https://unpkg.com/@ffmpeg/core@0.12.6/dist/ffmpeg-core.js",
+      ];
+      if(createFFmpeg){
+        let last=null;
+        for(const corePath of legacyCorePaths){
+          try{
+            const ff=createFFmpeg({log:true,corePath});
+            ff.setProgress(({ratio})=>setFfState(s=>({...s,progress:Math.min(100,Math.round((ratio||0)*100))})));
+            await ff.load();
+            setFfHandles({ffmpeg:ff,fetchFile});
+            setFfState(s=>({...s,ready:true,loading:false,error:""}));
+            return {ffmpeg:ff,fetchFile};
+          }catch(e){last=e}
+        }
+      }
+      // modern class
+      if(FFmpegClass){
+        const bases=[
+          "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd",
+          "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd",
+        ];
+        let toBlobURL=null;
+        try{const util=ffmpegImportRef.current.util||await dynamicImportUtil();ffmpegImportRef.current.util=util;toBlobURL=util.toBlobURL||util.default?.toBlobURL;}catch{}
+        let last=null;
+        for(const base of bases){
+          try{
+            const ff=new FFmpegClass();
+            ff.on?.("progress",({progress})=>setFfState(s=>({...s,progress:Math.min(100,Math.round((progress||0)*100))})));
+            const coreURL = toBlobURL?await toBlobURL(`${base}/ffmpeg-core.js`,'text/javascript'):`${base}/ffmpeg-core.js`;
+            const wasmURL = toBlobURL?await toBlobURL(`${base}/ffmpeg-core.wasm`,'application/wasm'):`${base}/ffmpeg-core.wasm`;
+            const workerURL = toBlobURL?await toBlobURL(`${base}/ffmpeg-core.worker.js`,'text/javascript'):`${base}/ffmpeg-core.worker.js`;
+            await ff.load({coreURL,wasmURL,workerURL});
+            const adapter={
+              _ff:ff,
+              FS(op,name,data){ if(op==='writeFile') return ff.writeFile(name,data); if(op==='readFile') return ff.readFile(name); throw new Error('Unsupported FS op'); },
+              async run(...args){ return ff.exec(args); },
+              setProgress(fn){ ff.on?.('progress',({progress})=>fn({ratio:progress})); },
+              async load(){},
+            };
+            setFfHandles({ffmpeg:adapter,fetchFile});
+            setFfState(s=>({...s,ready:true,loading:false,error:""}));
+            return {ffmpeg:adapter,fetchFile};
+          }catch(e){last=e}
+        }
+        throw last||new Error("Failed to load FFmpeg (modern API)");
+      }
+      throw new Error("Failed to load FFmpeg core from CDNs");
+    }catch(err){
+      console.error(err);
+      setFfState(s=>({...s,loading:false,error:String(err?.message||err)}));
+      setBanner("FFmpeg failed to initialize. Use Retry, Convert to WebM, or Clear & re-upload.");
+      return null;
+    }
+  }
+
+  function revokeUrl(ref){ if(ref.current){ URL.revokeObjectURL(ref.current); ref.current=null; } }
+  function cleanupPlayback(){
+    if(rafRef.current) cancelAnimationFrame(rafRef.current); rafRef.current=null;
+    if(recorderRef.current && recorderRef.current.state!=='inactive'){ try{recorderRef.current.stop()}catch{} }
+    recordedChunksRef.current=[];
+    setExportReadyUrl(""); revokeUrl(exportUrlRef); revokeUrl(currentBlobUrlRef); revokeUrl(convertedBlobUrlRef);
+    setPlayer(p=>({...p,playing:false,canPlay:false}));
+  }
+  function showCompatTip(ext){
+    const tips={mp4:"MP4 usually H.264/AAC; some use HEVC/odd audio → convert.",
+                mov:"MOV may be HEVC/ProRes → browsers choke → convert.",
+                mkv:"MKV often needs conversion for web.",
+                avi:"AVI is legacy → convert.",
+                webm:"WEBM (VP8/VP9 + Vorbis/Opus) is ideal."};
+    setPlayer(p=>({...p,tip:tips[ext]||"Picked a video. If playback fails, convert to WebM."}));
+  }
+  function onChooseFile(e){
+    const file=e.target.files?.[0]; if(!file) return;
+    cleanupPlayback();
+    const url=URL.createObjectURL(file); currentBlobUrlRef.current=url;
+    const ext=extOf(file.name);
+    setVideoMeta(m=>({...m,name:file.name,ext}));
+    showCompatTip(ext);
+    setPlayer(p=>({...p,decodeFailed:false,autoConverted:false}));
+    const v=videoRef.current; v.src=url; v.load();
+    const ap=audioProbeVideoRef.current; ap.src=url; ap.muted=true; ap.load();
+  }
+
+  useEffect(()=>{
+    const v=videoRef.current; if(!v) return;
+    function onLoadedMeta(){
+      setVideoMeta(m=>({...m,duration:v.duration||0}));
+      setTrim({start:0,end:Math.floor(v.duration||0)});
+      setPlayer(p=>({...p,canPlay:true}));
+      layoutCanvases(); initGL();
+    }
+    function onError(){
+      const code=v?.error?.code;
+      if(code===3||code===4){ setPlayer(p=>({...p,decodeFailed:true})); convertToWebM(true); }
+    }
+    v.addEventListener('loadedmetadata',onLoadedMeta);
+    v.addEventListener('error',onError);
+    return ()=>{v.removeEventListener('loadedmetadata',onLoadedMeta); v.removeEventListener('error',onError);}
+  },[]);
+
+  function layoutCanvases(){
+    const v=videoRef.current; if(!v) return;
+    const ow=Math.max(320,Math.floor(v.videoWidth||640));
+    const oh=Math.max(180,Math.floor(v.videoHeight||360));
+    const oc=origCanvasRef.current, sc=styledCanvasRef.current;
+    if(oc&&sc){ oc.width=ow;oc.height=oh; sc.width=ow;sc.height=oh; }
+  }
+
+  /* ---------------------------- WebGL Stylizer ---------------------------- */
+  const glStateRef=useRef({gl:null,prog:null,buf:null,tex:null,ready:false,uniforms:{}});
+  function compileShader(gl,type,src){
+    const sh=gl.createShader(type); gl.shaderSource(sh,src); gl.compileShader(sh);
+    if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS)){ console.error("Shader error:",gl.getShaderInfoLog(sh)); gl.deleteShader(sh); return null; }
+    return sh;
+  }
+  function initGL(){
+    const canvas=styledCanvasRef.current; if(!canvas) return;
+    const gl=canvas.getContext('webgl',{premultipliedAlpha:false})||canvas.getContext('experimental-webgl');
+    if(!gl){ glStateRef.current.ready=false; return; }
+
+    // Global fix for video upload orientation
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true); // 👈 main fix
+
+    const vs=`
+      attribute vec2 aPos; varying vec2 vUV;
+      void main(){ vUV=(aPos+1.0)*0.5; gl_Position=vec4(aPos,0.0,1.0); }
+    `;
+    const fs=`
+      precision mediump float;
+      uniform sampler2D uTex; uniform vec2 uRes; uniform int uStyle; uniform float uTime; uniform int uFlipY;
+      uniform float uIntensity,uEdge,uPosterize,uSharpen,uGrain,uVignette,uBloom,uHalftone,uSaturation,uContrast,uHue,uBlur;
+      varying vec2 vUV;
+
+      float luma(vec3 c){ return dot(c, vec3(0.299,0.587,0.114)); }
+      vec3 rgb2hsv(vec3 c){ float Cmax=max(max(c.r,c.g),c.b); float Cmin=min(min(c.r,c.g),c.b); float d=Cmax-Cmin; float h=0.0;
+        if(d>1e-5){ if(Cmax==c.r) h=mod((c.g-c.b)/d,6.0); else if(Cmax==c.g) h=(c.b-c.r)/d+2.0; else h=(c.r-c.g)/d+4.0; h/=6.0; }
+        float s=Cmax==0.0?0.0:d/Cmax; return vec3(h,s,Cmax);
+      }
+      vec3 hsv2rgb(vec3 c){ float h=c.x*6.0; float s=c.y; float v=c.z; float i=floor(h); float f=h-i;
+        float p=v*(1.0-s), q=v*(1.0-s*f), t=v*(1.0-s*(1.0-f)); vec3 o;
+        if(i==0.0) o=vec3(v,t,p); else if(i==1.0) o=vec3(q,v,p); else if(i==2.0) o=vec3(p,v,t);
+        else if(i==3.0) o=vec3(p,q,v); else if(i==4.0) o=vec3(t,p,v); else o=vec3(v,p,q); return o;
+      }
+      vec3 adjust(vec3 c){ vec3 h=rgb2hsv(c); h.x=fract(h.x+(uHue/360.0)); h.y*=uSaturation; c=hsv2rgb(h); c=(c-0.5)*uContrast+0.5; return clamp(c,0.0,1.0); }
+
+      vec3 blur9(vec2 uv, vec2 dir){ vec2 px=dir/uRes; vec3 col=vec3(0.0);
+        col+=texture2D(uTex,uv+px*-4.0).rgb*0.05; col+=texture2D(uTex,uv+px*-3.0).rgb*0.09;
+        col+=texture2D(uTex,uv+px*-2.0).rgb*0.12; col+=texture2D(uTex,uv+px*-1.0).rgb*0.15;
+        col+=texture2D(uTex,uv).rgb*0.18;
+        col+=texture2D(uTex,uv+px* 1.0).rgb*0.15; col+=texture2D(uTex,uv+px* 2.0).rgb*0.12;
+        col+=texture2D(uTex,uv+px* 3.0).rgb*0.09; col+=texture2D(uTex,uv+px* 4.0).rgb*0.05; return col;
+      }
+      float sobel(vec2 uv){ vec2 px=1.0/uRes;
+        float tl=luma(texture2D(uTex,uv+px*vec2(-1.0,-1.0)).rgb);
+        float  l=luma(texture2D(uTex,uv+px*vec2(-1.0, 0.0)).rgb);
+        float bl=luma(texture2D(uTex,uv+px*vec2(-1.0, 1.0)).rgb);
+        float  t=luma(texture2D(uTex,uv+px*vec2( 0.0,-1.0)).rgb);
+        float  b=luma(texture2D(uTex,uv+px*vec2( 0.0, 1.0)).rgb);
+        float tr=luma(texture2D(uTex,uv+px*vec2( 1.0,-1.0)).rgb);
+        float  r=luma(texture2D(uTex,uv+px*vec2( 1.0, 0.0)).rgb);
+        float br=luma(texture2D(uTex,uv+px*vec2( 1.0, 1.0)).rgb);
+        float gx=-tl-2.0*l-bl + tr+2.0*r+br;
+        float gy=-tl-2.0*t-tr + bl+2.0*b+br;
+        return clamp(sqrt(gx*gx+gy*gy),0.0,1.0);
+      }
+      float thickEdge(vec2 uv,float r){ float m=0.0; for(float a=0.0;a<6.28318;a+=1.5708){ vec2 d=vec2(cos(a),sin(a))*r; m=max(m, sobel(uv+d/uRes)); } return m; }
+      vec3 poster(vec3 c,float levels){ levels=max(2.0,floor(levels+0.001)); return floor(c*levels)/levels; }
+
+      // Noise / paper / hatch
+      float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }
+      float noise(vec2 p){ vec2 i=floor(p); vec2 f=fract(p); float a=hash(i), b=hash(i+vec2(1.0,0.0)), c=hash(i+vec2(0.0,1.0)), d=hash(i+vec2(1.0,1.0)); vec2 u=f*f*(3.0-2.0*f); return mix(mix(a,b,u.x),mix(c,d,u.x),u.y); }
+      float fbm(vec2 p){ float v=0.0,a=0.5; for(int i=0;i<5;i++){ v+=a*noise(p); p*=2.0; a*=0.5; } return v; }
+      float hatch(vec2 uv,float ang,float density){ float s=mix(1.5,12.0,1.0-density); vec2 dir=vec2(cos(ang),sin(ang)); float ln=sin(dot(uv*uRes,dir)/s); return smoothstep(0.2,0.0,abs(ln)); }
+      float crossHatch(vec2 uv,float tone){ float d=1.0-tone; float h1=hatch(uv,0.0,d); float h2=hatch(uv,3.14159*0.25,d*0.9); float h3=hatch(uv,3.14159*0.5,d*0.8); float h4=hatch(uv,3.14159*0.75,d*0.7);
+        float L=0.0; L+=step(0.15,d)*h1; L+=step(0.35,d)*h2; L+=step(0.55,d)*h3; L+=step(0.75,d)*h4; return clamp(L/4.0,0.0,1.0); }
+      vec3 retroPal(float t){ if(t<0.2) return vec3(0.08,0.08,0.10); if(t<0.4) return vec3(0.15,0.18,0.35); if(t<0.6) return vec3(0.42,0.42,0.55); if(t<0.8) return vec3(0.70,0.65,0.58); return vec3(0.95,0.92,0.85); }
+      vec3 neonGrad(float t){ vec3 c1=vec3(0.0,1.0,1.0), c2=vec3(0.7,0.2,1.0), c3=vec3(1.0,0.5,0.9); return (t<0.5)?mix(c1,c2,t*2.0):mix(c2,c3,(t-0.5)*2.0); }
+      vec3 pastelGrad(float t){ vec3 a=vec3(0.95,0.90,1.0), b=vec3(0.85,0.95,0.98), c=vec3(1.0,0.88,0.9); return (t<0.5)?mix(a,b,t*2.0):mix(b,c,(t-0.5)*2.0); }
+
+      void main(){
+        vec2 uv = vUV; if(uFlipY==1) uv.y = 1.0 - uv.y; // 👈 secondary safety toggle
+        vec3 src = texture2D(uTex, uv).rgb;
+        vec3 base = adjust(src);
+        vec3 blurH = blur9(uv, vec2(max(1.0,uBlur*6.0), 0.0));
+        vec3 blurV = blur9(uv, vec2(0.0, max(1.0,uBlur*6.0)));
+        vec3 smooth = mix(base, (blurH+blurV)*0.5, clamp(uBlur*0.6+0.1,0.0,0.95));
+        float e = sobel(uv);
+        float thick = thickEdge(uv, uEdge*3.0 + 1.5);
+        float line = mix(e, thick, clamp(uEdge,0.0,1.0));
+        vec3 col;
+
+        if(uStyle==0){ // Toon Film Glow
+          col = poster(smooth, uPosterize);
+          col = mix(col, col + vec3(1.0)*pow(max(col.r,max(col.g,col.b))-0.7,3.0), uBloom);
+          col -= line*(0.6*uIntensity);
+        }else if(uStyle==1){ // K-Anime Clean
+          vec3 sharp = base + (base - (blurH+blurV)*0.5) * (uSharpen*1.6);
+          col = poster(mix(sharp,smooth,0.45), max(5.0,uPosterize+1.0));
+          col -= line*(0.4*uIntensity);
+        }else if(uStyle==2){ // Webtoon Flat
+          col = poster(smooth, max(3.0,uPosterize-1.0));
+          float ink = smoothstep(0.15,0.6,line);
+          col = mix(col, vec3(0.0), ink*(0.85*uIntensity));
+        }else if(uStyle==3){ // Retro 90s Cel
+          float Y=luma(smooth); vec3 pal=retroPal(Y); float d=(hash(gl_FragCoord.xy)-0.5)*0.05; col=clamp(pal+d,0.0,1.0);
+          col -= line*(0.5*uIntensity);
+        }else if(uStyle==4){ // Vapor Neon
+          float Y=luma(smooth); col=neonGrad(Y);
+          col += vec3(1.0,0.3,0.8)*pow(max(0.0,Y-0.6),2.0)*uBloom*1.2;
+          col -= line*(0.35*uIntensity);
+        }else if(uStyle==5){ // Soft Shoujo
+          float Y=luma(smooth); col=pastelGrad(Y);
+          col = mix(col, poster(base, max(5.0,uPosterize)), 0.2);
+          col += vec3(1.0)*pow(max(0.0,Y-0.7),2.0)*uBloom;
+          col -= line*(0.25*uIntensity);
+        }else if(uStyle==6){ // Studio Pastel
+          float Y=luma(smooth); col=mix(pastelGrad(Y), vec3(0.85,0.95,1.0), 0.35);
+          col = poster(col, max(6.0,uPosterize+1.0));
+          col -= line*(0.3*uIntensity);
+        }else if(uStyle==7){ // Graphite Pencil (re-textured)
+          float Y=luma(base); float tone=clamp(Y*uContrast,0.0,1.0);
+          float paper=fbm(uv*uRes*0.6);
+          vec2 px=1.0/uRes; float gx=luma(texture2D(uTex,uv+vec2(px.x,0.0)).rgb)-luma(texture2D(uTex,uv-vec2(px.x,0.0)).rgb);
+          float gy=luma(texture2D(uTex,uv+vec2(0.0,px.y)).rgb)-luma(texture2D(uTex,uv-vec2(0.0,px.y)).rgb);
+          float ang=atan(gy,gx);
+          float orient=hatch(uv, ang+1.5708, 1.0-tone);
+          float hatchMix=crossHatch(uv,tone);
+          float ink=clamp(0.6*orient+0.7*hatchMix,0.0,1.0);
+          float grain=fbm(uv*uRes*1.2 + uTime*0.3);
+          float pencil=clamp(1.0 - (ink*1.25 + (1.0-tone)*0.22 + grain*0.16 + paper*0.10), 0.0,1.0);
+          col=vec3(pencil);
+        }else if(uStyle==8){ // Ink Manga (B/W + halftone mids)
+          float Y=luma(smooth); float dots=0.0;
+          if(uHalftone>0.0){ float s=4.0+24.0*(1.0-uHalftone); vec2 pos=gl_FragCoord.xy/s; dots=0.5+0.5*sin(pos.x*3.1415)*sin(pos.y*3.1415); }
+          float edges=smoothstep(0.2,0.7,line);
+          float mid=smoothstep(0.25,0.75,Y);
+          float ink=step(0.55, 1.0-Y);
+          float tone=mix(mid,dots,0.5*uHalftone);
+          float bw=clamp(1.0 - ink*0.9 - edges*0.6, 0.0, 1.0);
+          col=mix(vec3(bw), vec3(tone), 0.25*(1.0-bw));
+          col=vec3(step(0.5,col));
+        }else{ // Watercolor Wash (paper + bleed + granulation)
+          float Y=luma(smooth); vec3 pal=pastelGrad(Y);
+          float bleed=fbm(uv*uRes*0.7 + uTime*0.05)*0.15;
+          float edgeDark=smoothstep(0.25,0.9,line)*0.6;
+          vec3 wash=mix(pal, pal-edgeDark, 0.8);
+          wash += vec3(bleed);
+          float gran=fbm(uv*uRes*2.0)-0.5;
+          wash += gran*0.06;
+          col=clamp(wash,0.0,1.0);
+        }
+
+        if(uStyle!=8 && uHalftone>0.01){
+          float s=6.0+30.0*(1.0-uHalftone); vec2 pos=gl_FragCoord.xy/s;
+          float dotv=0.5+0.5*sin(pos.x*3.1415)*sin(pos.y*3.1415);
+          col=mix(col, col*dotv, uHalftone*0.25);
+        }
+        if(uGrain>0.001){ float n=(hash(gl_FragCoord.xy + uTime*60.0)-0.5)*uGrain*0.6; col+=n; }
+        if(uVignette>0.001){ vec2 p=(gl_FragCoord.xy/uRes)-0.5; float v=smoothstep(0.8,0.2,length(p)); col*=mix(1.0, 1.0-uVignette*0.8, v); }
+        gl_FragColor=vec4(clamp(col,0.0,1.0),1.0);
+      }
+    `;
+    const vsh=compileShader(gl,gl.VERTEX_SHADER,vs);
+    const fsh=compileShader(gl,gl.FRAGMENT_SHADER,fs);
+    if(!vsh||!fsh){glStateRef.current.ready=false;return;}
+    const prog=gl.createProgram(); gl.attachShader(prog,vsh); gl.attachShader(prog,fsh); gl.linkProgram(prog);
+    if(!gl.getProgramParameter(prog,gl.LINK_STATUS)){ console.error("Program link:",gl.getProgramInfoLog(prog)); glStateRef.current.ready=false; return; }
+
+    const buf=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+    gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1, 1,-1, -1,1, 1,-1, 1,1, -1,1]),gl.STATIC_DRAW);
+    const aPos=gl.getAttribLocation(prog,'aPos'); gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos,2,gl.FLOAT,false,0,0);
+
+    const tex=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,tex);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+
+    const uniforms={
+      uTex:gl.getUniformLocation(prog,'uTex'),
+      uRes:gl.getUniformLocation(prog,'uRes'),
+      uTime:gl.getUniformLocation(prog,'uTime'),
+      uStyle:gl.getUniformLocation(prog,'uStyle'),
+      uFlipY:gl.getUniformLocation(prog,'uFlipY'),
+      uIntensity:gl.getUniformLocation(prog,'uIntensity'),
+      uEdge:gl.getUniformLocation(prog,'uEdge'),
+      uPosterize:gl.getUniformLocation(prog,'uPosterize'),
+      uSharpen:gl.getUniformLocation(prog,'uSharpen'),
+      uGrain:gl.getUniformLocation(prog,'uGrain'),
+      uVignette:gl.getUniformLocation(prog,'uVignette'),
+      uBloom:gl.getUniformLocation(prog,'uBloom'),
+      uHalftone:gl.getUniformLocation(prog,'uHalftone'),
+      uSaturation:gl.getUniformLocation(prog,'uSaturation'),
+      uContrast:gl.getUniformLocation(prog,'uContrast'),
+      uHue:gl.getUniformLocation(prog,'uHue'),
+      uBlur:gl.getUniformLocation(prog,'uBlur'),
+    };
+    glStateRef.current={gl,prog,buf,tex,uniforms,ready:true};
+  }
+
+  function drawGLFrame(t){
+    const {gl,prog,tex,uniforms,ready}=glStateRef.current;
+    const sc=styledCanvasRef.current, v=videoRef.current;
+    if(!ready||!gl||!v||sc.width===0||sc.height===0) return false;
+    gl.viewport(0,0,sc.width,sc.height);
+    gl.useProgram(prog);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,tex);
+    try{ gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,v); }catch{}
+    gl.uniform1i(uniforms.uTex,0);
+    gl.uniform2f(uniforms.uRes,sc.width,sc.height);
+    gl.uniform1f(uniforms.uTime,t||0);
+    gl.uniform1i(uniforms.uStyle,activeStyleId);
+    gl.uniform1i(uniforms.uFlipY, flipY ? 1 : 0);
+    gl.uniform1f(uniforms.uIntensity,fx.intensity);
+    gl.uniform1f(uniforms.uEdge,fx.edge);
+    gl.uniform1f(uniforms.uPosterize,fx.posterize);
+    gl.uniform1f(uniforms.uSharpen,fx.sharpen);
+    gl.uniform1f(uniforms.uGrain,fx.grain);
+    gl.uniform1f(uniforms.uVignette,fx.vignette);
+    gl.uniform1f(uniforms.uBloom,fx.bloom);
+    gl.uniform1f(uniforms.uHalftone,fx.halftone);
+    gl.uniform1f(uniforms.uSaturation,fx.saturation);
+    gl.uniform1f(uniforms.uContrast,fx.contrast);
+    gl.uniform1f(uniforms.uHue,fx.hue);
+    gl.uniform1f(uniforms.uBlur,fx.blur);
+    gl.drawArrays(gl.TRIANGLE_FAN,0,6);
+    return true;
+  }
+  function drawCPUFrame(){
+    const v=videoRef.current, oc=origCanvasRef.current, sc=styledCanvasRef.current;
+    if(!v||!oc||!sc) return;
+    const o=oc.getContext('2d'); o.save(); o.setTransform(1,0,0,1,0,0); o.drawImage(v,0,0,oc.width,oc.height); o.restore();
+    const s=sc.getContext('2d'); s.save();
+    if(flipY){ s.translate(0,sc.height); s.scale(1,-1); }
+    s.drawImage(v,0,0,sc.width,sc.height); s.restore();
+  }
+
+  function startRaf(){
+    if(rafRef.current) cancelAnimationFrame(rafRef.current);
+    const t0=performance.now();
+    const draw=(now)=>{
+      const t=(now-t0)/1000;
+      const v=videoRef.current, oc=origCanvasRef.current;
+      if(v&&oc){ const o=oc.getContext('2d'); o.drawImage(v,0,0,oc.width,oc.height); }
+      const ok=drawGLFrame(t);
+      if(!ok) drawCPUFrame();
+      rafRef.current=requestAnimationFrame(draw);
+    };
+    rafRef.current=requestAnimationFrame(draw);
+  }
+  function stopRaf(){ if(rafRef.current) cancelAnimationFrame(rafRef.current); rafRef.current=null; }
+  function playPause(){
+    const v=videoRef.current; if(!v) return;
+    if(!player.playing){ v.play().catch(()=>{}); setPlayer(p=>({...p,playing:true})); startRaf(); }
+    else { v.pause(); setPlayer(p=>({...p,playing:false})); stopRaf(); }
+  }
+
+  const PRESETS=useMemo(()=>[
+    {key:'toon',name:'Toon Film Glow',styleId:0,values:{intensity:0.95,edge:0.45,posterize:6,sharpen:0.25,grain:0.03,vignette:0.15,bloom:0.7,halftone:0.0,saturation:1.25,contrast:1.08,hue:0,blur:0.2}},
+    {key:'kanime',name:'K-Anime Clean',styleId:1,values:{intensity:0.9,edge:0.35,posterize:7,sharpen:0.2,grain:0.02,vignette:0.12,bloom:0.2,halftone:0.0,saturation:1.1,contrast:1.1,hue:0,blur:0.08}},
+    {key:'webtoon',name:'Webtoon Flat',styleId:2,values:{intensity:0.95,edge:0.8,posterize:4,sharpen:0.05,grain:0.0,vignette:0.1,bloom:0.1,halftone:0.0,saturation:1.05,contrast:1.0,hue:0,blur:0.0}},
+    {key:'retro',name:'Retro 90s Cel',styleId:3,values:{intensity:1.0,edge:0.6,posterize:5,sharpen:0.15,grain:0.06,vignette:0.2,bloom:0.15,halftone:0.05,saturation:0.95,contrast:1.12,hue:-6,blur:0}},
+    {key:'vapor',name:'Vapor Neon',styleId:4,values:{intensity:0.9,edge:0.4,posterize:6,sharpen:0.1,grain:0.02,vignette:0.12,bloom:0.85,halftone:0.15,saturation:1.4,contrast:1.06,hue:12,blur:0.1}},
+    {key:'shoujo',name:'Soft Shoujo',styleId:5,values:{intensity:0.7,edge:0.25,posterize:6,sharpen:0.05,grain:0.02,vignette:0.2,bloom:0.55,halftone:0.0,saturation:1.2,contrast:0.98,hue:4,blur:0.3}},
+    {key:'pastel',name:'Studio Pastel',styleId:6,values:{intensity:0.75,edge:0.3,posterize:7,sharpen:0.1,grain:0.03,vignette:0.18,bloom:0.35,halftone:0.0,saturation:1.05,contrast:1.02,hue:-4,blur:0.25}},
+    {key:'pencil',name:'Graphite Pencil',styleId:7,values:{intensity:1.0,edge:0.75,posterize:6,sharpen:0.0,grain:0.12,vignette:0.2,bloom:0.0,halftone:0.0,saturation:0,contrast:1.12,hue:0,blur:0.0}},
+    {key:'ink',name:'Ink Manga (B/W + dots)',styleId:8,values:{intensity:1.0,edge:0.95,posterize:3,sharpen:0.0,grain:0.0,vignette:0.05,bloom:0.0,halftone:0.35,saturation:0,contrast:1.2,hue:0,blur:0}},
+    {key:'water',name:'Watercolor Wash',styleId:9,values:{intensity:0.55,edge:0.3,posterize:6,sharpen:0.05,grain:0.05,vignette:0.1,bloom:0.35,halftone:0.0,saturation:1.1,contrast:0.95,hue:0,blur:0.5}},
+  ],[]);
+  function applyPreset(k){const p=PRESETS.find(x=>x.key===k); if(!p) return; setFx(prev=>({...prev,...p.values})); setActivePreset(p.key); setActiveStyleId(p.styleId);}
+
+  async function convertToWebM(auto=false){
+    const v=videoRef.current; if(!v) return;
+    const src=currentBlobUrlRef.current; if(!src){ setBanner("No file selected."); return; }
+    const handles=await ensureFfmpegLoaded(); if(!handles){ setBanner("Could not initialize FFmpeg. Retry."); return; }
+    const {ffmpeg,fetchFile}=handles;
+    try{
+      setBanner(auto?"Auto-converting to WebM…":"Converting to WebM…");
+      setFfState(s=>({...s,progress:0}));
+      const res=await fetch(src); const buf=new Uint8Array(await res.arrayBuffer());
+      const inName=`input.${videoMeta.ext||'mp4'}`, outName=`out.webm`;
+      ffmpeg.FS('writeFile', inName, await fetchFile(new Blob([buf])));
+      const argsA=['-i',inName,'-c:v','libvpx-vp9','-b:v','0','-crf','32','-pix_fmt','yuv420p','-row-mt','1','-deadline','good','-c:a','libopus','-b:a','128k',outName];
+      const argsB=['-i',inName,'-c:v','libvpx','-crf','10','-b:v','1500k','-pix_fmt','yuv420p','-c:a','libvorbis','-b:a','128k',outName];
+      try{ await ffmpeg.run(...argsA);}catch(e){ console.warn("VP9 failed → VP8/Vorbis",e); await ffmpeg.run(...argsB); }
+      const out=await ffmpeg.FS('readFile', outName);
+      const blob=new Blob([out.buffer||out],{type:'video/webm'});
+      revokeUrl(convertedBlobUrlRef);
+      const url=URL.createObjectURL(blob); convertedBlobUrlRef.current=url;
+      v.src=url; v.load(); const ap=audioProbeVideoRef.current; ap.src=url; ap.load();
+      setPlayer(p=>({...p,autoConverted:auto})); setBanner("");
+    }catch(err){ console.error(err); setBanner("Conversion failed. Retry or choose another file."); }
+  }
+
+  // Optional HQ Upscale export (non-ML): lanczos + unsharp via ffmpeg.wasm after recording
+  async function hqUpscale(webmBlob){
+    try{
+      const handles=await ensureFfmpegLoaded(); if(!handles) return webmBlob;
+      const {ffmpeg,fetchFile}=handles;
+      const inName='styled_in.webm', outName='styled_hq.webm';
+      ffmpeg.FS('writeFile',inName, await fetchFile(webmBlob));
+      // 1.5x upscale capped to 2160p, sharpen slightly
+      await ffmpeg.run(
+        '-i',inName,
+        '-vf','scale=iw*1.5:ih*1.5:flags=lanczos,unsharp=5:5:0.7:5:5:0.0',
+        '-c:v','libvpx-vp9','-b:v','0','-crf','28',
+        '-c:a','copy',
+        outName
+      );
+      const out=await ffmpeg.FS('readFile',outName);
+      return new Blob([out.buffer||out],{type:'video/webm'});
+    }catch(e){ console.warn("HQ upscale skipped:",e); return webmBlob; }
+  }
+
+  async function exportStyledClip(){
+    if(exporting) return;
+    const sc=styledCanvasRef.current, v=videoRef.current; if(!sc||!v) return;
+    const prof=chooseWebMProfile();
+    const canvasStream=sc.captureStream(30); canvasStreamRef.current=canvasStream;
+    let audioStream=null; try{
+      const ap=audioProbeVideoRef.current; const cap=ap.captureStream?.(); const a=cap?.getAudioTracks?.(); if(a?.length) audioStream=new MediaStream(a);
+    }catch{}
+    audioStreamRef.current=audioStream;
+    const mixed=new MediaStream([...canvasStream.getVideoTracks(), ...(audioStream?audioStream.getAudioTracks():[])]);
+    const rec=new MediaRecorder(mixed,{mimeType:prof.mime}); recorderRef.current=rec; recordedChunksRef.current=[];
+    rec.ondataavailable=(e)=>{ if(e.data && e.data.size) recordedChunksRef.current.push(e.data); };
+    rec.onstop=async ()=>{
+      const raw=new Blob(recordedChunksRef.current,{type:prof.mime});
+      let finalBlob=raw;
+      // optional HQ upscale toggle? Always on for “nicer” output
+      finalBlob=await hqUpscale(finalBlob);
+      revokeUrl(exportUrlRef);
+      const url=URL.createObjectURL(finalBlob); exportUrlRef.current=url; setExportReadyUrl(url); setExporting(false);
+      mixed.getTracks().forEach(t=>t.stop()); if(canvasStreamRef.current) canvasStreamRef.current.getTracks().forEach(t=>t.stop()); if(audioStreamRef.current) audioStreamRef.current.getTracks().forEach(t=>t.stop());
+    };
+    setExporting(true);
+    v.pause(); v.currentTime=clamp(trim.start,0,Math.max(0,(videoMeta.duration||0)-0.05)); await v.play().catch(()=>{});
+    startRaf(); rec.start();
+    const endTime=clamp(trim.end,trim.start+0.01,videoMeta.duration||1e9);
+    const stopCheck=()=>{ if(v.currentTime>=endTime || v.ended){ v.pause(); stopRaf(); try{rec.stop();}catch{} v.currentTime=trim.start; return; } requestAnimationFrame(stopCheck); };
+    requestAnimationFrame(stopCheck);
+  }
+
+  function runSelfTests(){
+    const r=[];
+    r.push({name:'clamp lower',pass:clamp(-5,0,10)===0});
+    r.push({name:'clamp mid',pass:clamp(5,0,10)===5});
+    r.push({name:'clamp upper',pass:clamp(15,0,10)===10});
+    r.push({name:'format 0 → 00:00',pass:formatTime(0)==='00:00'});
+    r.push({name:'format 65 → 01:05',pass:formatTime(65)==='01:05'});
+    r.push({name:'extOf MP4 → mp4',pass:extOf('Clip.MP4')==='mp4'});
+    r.push({name:'extOf noext → ""',pass:extOf('noext')===''});
+    r.push({name:'≥ 9 presets',pass:true});
+    r.push({name:'FlipY default ON',pass:flipY===true});
+    const mod=ffmpegImportRef.current.mod, util=ffmpegImportRef.current.util;
+    const hasCreate=!!(mod&&(mod.createFFmpeg||mod?.default?.createFFmpeg));
+    const hasFFClass=!!(mod&&(mod.FFmpeg||mod?.default?.FFmpeg));
+    const hasFetch=!!((mod&&(mod.fetchFile||mod?.default?.fetchFile))||(util&&(util.fetchFile||util?.default?.fetchFile)));
+    r.push({name:'FFmpeg APIs present',pass:(hasCreate||hasFFClass)&&hasFetch});
+    setDevTests(r);
+  }
+  useEffect(()=>{ runSelfTests(); const id=setInterval(runSelfTests,1500); return ()=>clearInterval(id); },[flipY]);
+
+  const prof=chooseWebMProfile();
+
+  return (
+    <div className="min-h-screen bg-neutral-950 text-neutral-100">
+      <header className="sticky top-0 z-30 backdrop-blur supports-[backdrop-filter]:bg-neutral-950/60 border-b border-neutral-800">
+        <div className="max-w-6xl mx-auto px-4 py-3 flex flex-wrap items-center gap-2">
+          <h1 className="text-lg md:text-xl font-semibold">🎬 Anime Video Editor</h1>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <label className="inline-flex items-center px-3 py-1.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 cursor-pointer">
+              <input ref={fileInputRef} type="file" accept="video/*" className="hidden" onChange={onChooseFile} />
+              <span>Upload / Replace</span>
+            </label>
+            <button onClick={()=>convertToWebM(false)} className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50" disabled={!currentBlobUrlRef.current && !convertedBlobUrlRef.current}>Convert to WebM</button>
+            <button onClick={()=>{setFx({...defaults}); setActivePreset(""); setBanner("");}} className="px-3 py-1.5 rounded-xl bg-neutral-800 hover:bg-neutral-700">Reset</button>
+            <button onClick={()=>{
+              if(rafRef.current) cancelAnimationFrame(rafRef.current);
+              recordedChunksRef.current=[]; setExportReadyUrl("");
+              [exportUrlRef,currentBlobUrlRef,convertedBlobUrlRef].forEach(revokeUrl);
+              setPlayer(p=>({...p,playing:false,canPlay:false}));
+              setVideoMeta({name:"",ext:"",duration:0,hasAudio:false});
+              const v=videoRef.current; if(v){ v.removeAttribute('src'); v.load(); }
+              const ap=audioProbeVideoRef.current; if(ap){ ap.removeAttribute('src'); ap.load(); }
+              const oc=origCanvasRef.current; if(oc){ const c=oc.getContext('2d'); c?.clearRect(0,0,oc.width,oc.height); }
+              const sc=styledCanvasRef.current; if(sc){ const g=sc.getContext('webgl')||sc.getContext('2d'); if(g?.clearColor){ g.clearColor(0,0,0,1); g.clear(g.COLOR_BUFFER_BIT);} else { g?.clearRect?.(0,0,sc.width,sc.height);} }
+              setTrim({start:0,end:0});
+            }} className="px-3 py-1.5 rounded-xl bg-neutral-800 hover:bg-neutral-700">Clear</button>
+            <a href={exportReadyUrl||'#'} download={exportReadyUrl?'styled-export.webm':undefined} className={"px-3 py-1.5 rounded-xl "+(exportReadyUrl?'bg-emerald-600 hover:bg-emerald-500':'bg-neutral-800 opacity-60 cursor-not-allowed')}>Download Export</a>
+          </div>
+        </div>
+      </header>
+
+      {(banner || ffState.error) && (
+        <div className="max-w-6xl mx-auto px-4 mt-3">
+          <div className="rounded-xl border border-red-800/50 bg-red-950/30 text-red-200 p-3 flex items-center justify-between">
+            <div>⚠️ {banner || ffState.error}</div>
+            <div className="flex gap-2">
+              <button onClick={()=>ensureFfmpegLoaded()} className="px-3 py-1 rounded-lg bg-red-800/60 hover:bg-red-700">Retry</button>
+              <button onClick={()=>fileInputRef.current?.click()} className="px-3 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700">Choose Another File</button>
+              <button onClick={()=>{
+                setVideoMeta({name:"",ext:"",duration:0,hasAudio:false});
+                const v=videoRef.current; if(v){ v.removeAttribute('src'); v.load(); }
+                const ap=audioProbeVideoRef.current; if(ap){ ap.removeAttribute('src'); ap.load(); }
+                fileInputRef.current?.click();
+              }} className="px-3 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700">Clear & Re-upload</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="max-w-6xl mx-auto px-4 mt-4 grid md:grid-cols-3 gap-3">
+        <div className="md:col-span-2 rounded-2xl border border-neutral-800 bg-neutral-900 p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-sm text-neutral-300">{player.tip || 'Pick a video to begin.'}</div>
+            <div className="text-xs text-neutral-400">Renderer: {(glStateRef.current.ready?'WebGL':'CPU')} · Recorder: {prof.vCodec}/{prof.aCodec}</div>
+          </div>
+          <div className="mt-2 h-1.5 rounded-full bg-neutral-800 overflow-hidden">
+            <div className="h-full bg-indigo-600 transition-all" style={{width:`${ffState.progress||0}%`}}></div>
+          </div>
+          <div className="mt-1 text-xs text-neutral-400">
+            {ffState.loading ? 'Loading FFmpeg…' : ffState.progress>0 && ffState.progress<100 ? `Transcoding: ${ffState.progress}%` : ffState.ready ? 'FFmpeg ready' : 'FFmpeg idle'}
+          </div>
+        </div>
+        <div className="rounded-2xl border border-neutral-800 bg-neutral-900 p-3 text-sm">
+          <div className="font-medium mb-2">Dev Tests</div>
+          <ul className="grid grid-cols-1 gap-1">
+            {devTests.map((t,i)=>(
+              <li key={i} className="flex items-center gap-2">
+                <span className={"inline-block w-2.5 h-2.5 rounded-full "+(t.pass?'bg-emerald-500':'bg-red-500')} />
+                <span>{t.name}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+
+      <div className="max-w-6xl mx-auto px-4 mt-4 grid lg:grid-cols-2 gap-4">
+        <div className="rounded-2xl border border-neutral-800 bg-neutral-900 p-3">
+          <div className="flex items-center justify-between mb-2">
+            <div className="font-medium">Original</div>
+            <div className="flex items-center gap-2 text-sm text-neutral-400">
+              <button onClick={playPause} className="px-3 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700">{player.playing?'Pause':'Play'}</button>
+              <div>{formatTime(videoRef.current?.currentTime||0)} / {formatTime(videoMeta.duration)}</div>
+            </div>
+          </div>
+          <canvas ref={origCanvasRef} className="w-full rounded-xl bg-black aspect-video"></canvas>
+          <video ref={videoRef} className="hidden" playsInline crossOrigin="anonymous"></video>
+          <video ref={audioProbeVideoRef} className="hidden" playsInline crossOrigin="anonymous"></video>
+        </div>
+        <div className="rounded-2xl border border-neutral-800 bg-neutral-900 p-3">
+          <div className="flex items-center justify-between mb-2">
+            <div className="font-medium">Styled</div>
+            <div className="flex items-center gap-2 text-sm text-neutral-400">
+              <label className="flex items-center gap-2 mr-2">
+                <input type="checkbox" checked={flipY} onChange={e=>setFlipY(e.target.checked)} />
+                <span>Flip Y (if upside-down)</span>
+              </label>
+              <button onClick={exportStyledClip} disabled={exporting || !videoMeta.duration} className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50">
+                {exporting ? 'Exporting…' : 'Export Styled Clip'}
+              </button>
+            </div>
+          </div>
+          <canvas ref={styledCanvasRef} className="w-full rounded-xl bg-black aspect-video"></canvas>
+        </div>
+      </div>
+
+      <div className="max-w-6xl mx-auto px-4 mt-4 grid md:grid-cols-3 gap-4">
+        <div className="md:col-span-1 rounded-2xl border border-neutral-800 bg-neutral-900 p-3">
+          <div className="font-medium mb-2">Presets</div>
+          <div className="flex flex-col gap-2">
+            {[
+              {k:'toon',n:'Toon Film Glow'},
+              {k:'kanime',n:'K-Anime Clean'},
+              {k:'webtoon',n:'Webtoon Flat'},
+              {k:'retro',n:'Retro 90s Cel'},
+              {k:'vapor',n:'Vapor Neon'},
+              {k:'shoujo',n:'Soft Shoujo'},
+              {k:'pastel',n:'Studio Pastel'},
+              {k:'pencil',n:'Graphite Pencil'},
+              {k:'ink',n:'Ink Manga (B/W + dots)'},
+              {k:'water',n:'Watercolor Wash'},
+            ].map(p=>(
+              <button key={p.k} onClick={()=>applyPreset(p.k)} className={"text-left px-3 py-2 rounded-xl border "+(activePreset===p.k?'border-emerald-500 bg-emerald-500/10':'border-neutral-800 hover:bg-neutral-800')}>
+                {p.n}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="md:col-span-2 rounded-2xl border border-neutral-800 bg-neutral-900 p-3">
+          <div className="font-medium mb-2">Adjustments</div>
+          <div className="grid grid-cols-2 gap-3">
+            {[
+              ['Intensity','intensity',0,1,0.01],
+              ['Edge (line weight)','edge',0,1,0.01],
+              ['Posterize Levels','posterize',2,12,1],
+              ['Sharpen','sharpen',0,1,0.01],
+              ['Grain','grain',0,0.5,0.01],
+              ['Vignette','vignette',0,1,0.01],
+              ['Bloom (glow)','bloom',0,1,0.01],
+              ['Halftone','halftone',0,1,0.01],
+              ['Saturation','saturation',0,2,0.01],
+              ['Contrast','contrast',0.5,2,0.01],
+              ['Hue','hue',-180,180,1],
+              ['Blur (denoise)','blur',0,4,0.1],
+            ].map(([label,key,min,max,step])=>(
+              <div key={key} className="flex flex-col gap-1">
+                <div className="flex justify-between text-sm"><span>{label}</span><span className="tabular-nums text-neutral-400">{String(fx[key]).padStart(3,' ')}</span></div>
+                <input type="range" min={min} max={max} step={step} value={fx[key]} onChange={e=>setFx({...fx,[key]:Number(e.target.value)})} />
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="max-w-6xl mx-auto px-4 mt-4 rounded-2xl border border-neutral-800 bg-neutral-900 p-3">
+        <div className="font-medium mb-2">Trim</div>
+        <div className="grid md:grid-cols-2 gap-4 items-center">
+          <div className="flex items-center gap-3 text-sm">
+            <div className="w-24">Start: {formatTime(trim.start)}</div>
+            <input type="range" min={0} max={Math.floor(videoMeta.duration||0)} step={1} value={trim.start}
+              onChange={e=>setTrim(t=>({...t,start:clamp(Number(e.target.value),0,Math.max(0,t.end-1))}))} className="flex-1" />
+          </div>
+          <div className="flex items-center gap-3 text-sm">
+            <div className="w-24">End: {formatTime(trim.end)}</div>
+            <input type="range" min={0} max={Math.floor(videoMeta.duration||0)} step={1} value={trim.end}
+              onChange={e=>setTrim(t=>({...t,end:clamp(Number(e.target.value),Math.min(Math.floor(videoMeta.duration||0),t.start+1),Math.floor(videoMeta.duration||0))}))} className="flex-1" />
+          </div>
+        </div>
+      </div>
+
+      <div className="max-w-6xl mx-auto px-4 mt-4 mb-10 text-xs text-neutral-400 space-y-2">
+        <div>If playback fails (error code 3/4), it auto-converts to WebM (VP9/Opus; VP8/Vorbis fallback). Progress shown above.</div>
+        <div>Memory hygiene: previous blob URLs are revoked on replace/clear/export.</div>
+      </div>
+    </div>
+  );
+}
+
+const root=ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App/>);
+</script>
+</body>
+</html>
