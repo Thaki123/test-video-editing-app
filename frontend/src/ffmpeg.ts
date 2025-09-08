@@ -4,11 +4,11 @@ export async function loadFFmpeg() {
   return mod;
 }
 
-export async function convertToWebM(data: Uint8Array, name: string) {
+export async function convertToWebM(data: Uint8Array, name: string): Promise<Uint8Array> {
   const { FFmpeg } = await loadFFmpeg();
-  const ffmpeg = new FFmpeg({ log: false });
+  const ffmpeg = new FFmpeg();
   await ffmpeg.load();
   await ffmpeg.writeFile(name, data);
   await ffmpeg.exec(['-i', name, '-c:v', 'libvpx', '-f', 'webm', 'out.webm']);
-  return ffmpeg.readFile('out.webm');
+  return await ffmpeg.readFile('out.webm') as Uint8Array;
 }

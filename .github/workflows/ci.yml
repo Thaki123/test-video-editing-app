@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install frontend deps
+        run: npm ci
+        working-directory: frontend
+      - name: Lint frontend
+        run: npm run lint
+        working-directory: frontend
+      - name: Test frontend
+        run: npm test -- --run
+        working-directory: frontend
+      - name: Test API
+        run: mvn -B -ntp test
+        working-directory: backend/api
+      - name: Test worker
+        run: mvn -B -ntp test
+        working-directory: backend/worker
+      - name: Build API image
+        run: docker build -t api backend/api
+      - name: Build worker image
+        run: docker build -t worker backend/worker
+      - name: Build frontend image
+        run: docker build -t frontend frontend
