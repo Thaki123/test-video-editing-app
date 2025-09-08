@@ -8,8 +8,9 @@ export function hasWebGL(): boolean {
 
 // Minimal shader that simply draws the video frame
 export function applyShader(video: HTMLVideoElement, canvas: HTMLCanvasElement) {
-  const gl = canvas.getContext('webgl');
-  if (!gl) return;
+  const maybeGl = canvas.getContext('webgl') as WebGLRenderingContext | null;
+  if (!maybeGl) return;
+  const gl: WebGLRenderingContext = maybeGl;
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
   const program = gl.createProgram();

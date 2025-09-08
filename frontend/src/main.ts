@@ -57,7 +57,7 @@ renderBtn.addEventListener('click', async () => {
       end: Number(endInput.value)
     })
   });
-  const { id, ws } = await jobRes.json();
+  const { ws } = await jobRes.json();
   const socket = new WebSocket(ws);
   socket.onmessage = (ev) => {
     const data = JSON.parse(ev.data);
