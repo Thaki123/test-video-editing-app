@@ -1,23 +1,23 @@
 import './style.css';
-import { PRESETS, applyPreset } from './presets';
+import { STYLES, applyStyle } from './presets';
 import { convertToWebM } from './ffmpeg';
 import { hasWebGL, applyShader } from './webgl';
 
 const uploadInput = document.getElementById('upload') as HTMLInputElement;
 const original = document.getElementById('original') as HTMLVideoElement;
 const styled = document.getElementById('styled') as HTMLCanvasElement;
-const presetSelect = document.getElementById('preset') as HTMLSelectElement;
+const styleSelect = document.getElementById('style') as HTMLSelectElement;
 const startInput = document.getElementById('start') as HTMLInputElement;
 const endInput = document.getElementById('end') as HTMLInputElement;
 const renderBtn = document.getElementById('render') as HTMLButtonElement;
 const progress = document.getElementById('progress') as HTMLProgressElement;
 
-// Populate preset options
-for (const p of PRESETS) {
+// Populate style options
+for (const p of STYLES) {
   const opt = document.createElement('option');
   opt.value = p.id;
   opt.textContent = p.name;
-  presetSelect.appendChild(opt);
+  styleSelect.appendChild(opt);
 }
 
 uploadInput.addEventListener('change', () => {
@@ -32,7 +32,24 @@ uploadInput.addEventListener('change', () => {
   };
 });
 
-presetSelect.addEventListener('change', () => applyPreset(styled, presetSelect.value));
+async function renderFrame() {
+  await applyStyle(original, styled, styleSelect.value);
+  progress.value = (original.currentTime / original.duration) * 100;
+  if (!original.paused && !original.ended) {
+    requestAnimationFrame(renderFrame);
+  }
+}
+
+original.addEventListener('play', () => {
+  requestAnimationFrame(renderFrame);
+});
+styleSelect.addEventListener('change', () => {
+  if (!original.paused) {
+    requestAnimationFrame(renderFrame);
+  } else {
+    applyStyle(original, styled, styleSelect.value);
+  }
+});
 
 renderBtn.addEventListener('click', async () => {
   const file = uploadInput.files?.[0];
@@ -52,7 +69,7 @@ renderBtn.addEventListener('click', async () => {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       input: url,
-      preset: presetSelect.value,
+      preset: styleSelect.value,
       start: Number(startInput.value),
       end: Number(endInput.value)
     })
