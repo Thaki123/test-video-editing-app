@@ -3,6 +3,9 @@
 
 Models:
 - AnimeGANv2 (Shinkai)
+- Fast Neural Style "Candy" (manga)
+- Fast Neural Style "Rain Princess" (watercolor)
+- Fast Neural Style "Udnie" (pencil sketch)
 
 The script downloads each model into the directory specified by the
 ``MODEL_DIR`` environment variable (defaults to ``models/``).  URLs point to
@@ -13,10 +16,20 @@ import pathlib
 import urllib.request
 
 MODELS = {
-    # Model converted by project author
-    "animeganv2.onnx": (
+    # Anime style transfer
+    "anime.onnx": (
         "https://raw.githubusercontent.com/TachibanaYoshino/AnimeGANv2/master/"
         "pb_and_onnx_model/Shinkai_53.onnx"
+    ),
+    # Additional style presets from the ONNX model zoo
+    "manga.onnx": (
+        "https://github.com/onnx/models/raw/main/vision/style_transfer/fast_neural_style/model/candy-9.onnx"
+    ),
+    "watercolor.onnx": (
+        "https://github.com/onnx/models/raw/main/vision/style_transfer/fast_neural_style/model/rain-princess-9.onnx"
+    ),
+    "pencil.onnx": (
+        "https://github.com/onnx/models/raw/main/vision/style_transfer/fast_neural_style/model/udnie-9.onnx"
     ),
 }
 

@@ -45,6 +45,18 @@ before writing results back to MinIO.
 | `./e2e.sh`                              | Start stack and request a JWT token       |
 | `./render.sh`                           | Run the worker container for one-off jobs |
 
+## Pre-trained models
+
+The download script retrieves small ONNX models for each style preset and
+saves them under `models/` (or the directory specified by `MODEL_DIR`).
+
+| File            | Style                                    | Size |
+| --------------- | ---------------------------------------- | ---- |
+| `anime.onnx`    | AnimeGANv2 (Shinkai 53)                  | ~8.6 MB |
+| `manga.onnx`    | Fast Neural Style "Candy"               | ~6 MB |
+| `watercolor.onnx` | Fast Neural Style "Rain Princess"     | ~6 MB |
+| `pencil.onnx`   | Fast Neural Style "Udnie"               | ~6 MB |
+
 ## Running the Docker stack
 
 ```bash
